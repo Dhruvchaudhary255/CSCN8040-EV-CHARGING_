@@ -40,6 +40,7 @@ page = st.sidebar.radio(
         "3️⃣ Plug / Port Mix",
         "4️⃣ Station Map",
         "5️⃣ Data Explorer",
+        "6️⃣ Rural Demand Index (RDI) Model",
     ],
 )
 
@@ -353,3 +354,187 @@ elif page.startswith("5️⃣"):
         st.subheader("Summary statistics")
         with st.expander("Show describe()"):
             st.write(df.describe(include="all"))
+
+ # ---------- PAGE 6: Rural Demand Index (RDI) Model ---------- #
+
+elif page.startswith("6️⃣"):
+    st.title("📊 Rural Demand Index (RDI) Model")
+
+    if summary_df is None or cities_df is None:
+        st.error("Required datasets missing: ev_city_station_summary.csv and canadacities.csv")
+    else:
+        st.success("RDI model using EV vs stations + city demographics")
+
+        # ------- Show columns for debugging -------
+        st.write("City dataset columns:", list(cities_df.columns))
+
+        # ------------------------------
+        # FIX CITY COLUMN NAMES
+        # ------------------------------
+        cities_df_clean = cities_df.rename(columns={
+            "city": "City",
+            "City": "City",
+            "province_name": "Province",
+            "province": "Province",
+            "population": "Population",
+            "Population": "Population"
+        })
+
+        st.write("After renaming:", list(cities_df_clean.columns))
+
+        # ------------------------------
+        # VALIDATE MERGE COLUMNS
+        # ------------------------------
+        if not all(col in summary_df.columns for col in ["City", "Province"]):
+            st.error("❌ Your summary_df must contain 'City' and 'Province' columns.")
+            st.write("summary_df columns:", list(summary_df.columns))
+            st.stop()
+
+        if not all(col in cities_df_clean.columns for col in ["City", "Province", "Population"]):
+            st.error("❌ canadacities.csv must contain 'City', 'Province', 'Population'")
+            st.write("cities_df_clean columns:", list(cities_df_clean.columns))
+            st.stop()
+
+        # ------------------------------
+        # MERGE summary + cities demographics
+        # ------------------------------
+        merged = pd.merge(
+            summary_df,
+            cities_df_clean[["City", "Province", "Population"]],
+            on=["City", "Province"],
+            how="left"
+        )
+
+        # ------------------------------
+        # FEATURE ENGINEERING
+        # ------------------------------
+        st.subheader("🧮 Feature Engineering")
+
+        # Fix EV_Count and Charging_Stations name detection
+        ev_col = [c for c in merged.columns if c.lower() in ["ev_count", "evs", "evs_count"]]
+        stn_col = [c for c in merged.columns if c.lower() in ["charging_stations", "stations"]]
+
+        if not ev_col or not stn_col:
+            st.error("Could not detect EV_Count or Charging_Stations columns.")
+            st.write("Detected:", list(merged.columns))
+            st.stop()
+
+        ev_col = ev_col[0]
+        stn_col = stn_col[0]
+
+        merged["EV_per_capita"] = merged[ev_col] / merged["Population"]
+        merged["Distance_Score"] = merged["Population"] / (merged[stn_col] + 1)
+        merged["Accessibility"] = merged[stn_col] / (merged[ev_col] + 1)
+
+        # Normalize
+        for col in ["EV_per_capita", "Distance_Score", "Accessibility"]:
+            merged[f"{col}_norm"] = (
+                (merged[col] - merged[col].min()) /
+                (merged[col].max() - merged[col].min())
+            )
+
+        # Final RDI Score
+        merged["RDI"] = (
+            0.40 * merged["EV_per_capita_norm"] +
+            0.40 * merged["Distance_Score_norm"] +
+            0.20 * merged["Accessibility_norm"]
+        )
+
+        # ------------------------------
+        # CLEAN NaN / Inf (CRITICAL FIX)
+        # ------------------------------
+        import numpy as np
+        cleaned = merged.copy()
+
+        for col in ["EV_per_capita", "Distance_Score", "Accessibility", "RDI"]:
+            cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
+            cleaned[col].replace([np.inf, -np.inf], np.nan, inplace=True)
+            cleaned[col].fillna(cleaned[col].median(), inplace=True)
+
+        st.write("Preview of engineered features:")
+        st.dataframe(cleaned[["City", "Province", ev_col, stn_col, "RDI"]].head())
+
+        st.markdown("---")
+
+        # ------------------------------
+        # RDI DISTRIBUTION
+        # ------------------------------
+        st.subheader("📈 RDI Distribution")
+        fig = px.histogram(cleaned, x="RDI", nbins=20)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ------------------------------
+        # REGRESSION MODEL
+        # ------------------------------
+        st.subheader("🤖 Regression Model")
+
+        from sklearn.model_selection import train_test_split
+        from sklearn.linear_model import LinearRegression
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+        features = ["EV_per_capita", "Distance_Score", "Accessibility"]
+
+        X = cleaned[features]
+        y = cleaned["RDI"]
+
+        # Always clean X & y
+        X = X.fillna(X.median())
+        y = y.fillna(y.median())
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+
+        lr = LinearRegression()
+        lr.fit(X_train, y_train)
+        y_pred = lr.predict(X_test)
+
+        # Performance metrics
+        st.write("### Model Performance")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("MAE", f"{mean_absolute_error(y_test, y_pred):.4f}")
+        c2.metric("RMSE", f"{mean_squared_error(y_test, y_pred, squared=False):.4f}")
+        c3.metric("R² Score", f"{r2_score(y_test, y_pred):.4f}")
+
+        # Feature importance
+        coef_df = pd.DataFrame({
+            "Feature": features,
+            "Coefficient": lr.coef_
+        })
+
+        st.write("### Feature Importance")
+        st.dataframe(coef_df)
+        st.plotly_chart(px.bar(coef_df, x="Feature", y="Coefficient"), use_container_width=True)
+
+        st.markdown("---")
+
+        # ------------------------------
+        # TOP UNDERSERVED CITIES
+        # ------------------------------
+        st.subheader("🚨 Top Underserved Regions by RDI")
+
+        unders = cleaned.sort_values("RDI", ascending=False).head(15)
+        st.dataframe(unders[["City", "Province", ev_col, stn_col, "RDI"]])
+
+        st.plotly_chart(
+            px.bar(
+                unders,
+                x="City",
+                y="RDI",
+                color="Province",
+                title="Top Underserved Cities"
+            ),
+            use_container_width=True
+        )
+
+        st.markdown("---")
+
+        # ------------------------------
+        # DOWNLOAD BUTTON
+        # ------------------------------
+        st.download_button(
+            "⬇️ Download RDI Results",
+            cleaned.to_csv(index=False),
+            file_name="RDI_results.csv",
+            mime="text/csv"
+        )
