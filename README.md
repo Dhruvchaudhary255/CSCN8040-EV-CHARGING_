@@ -165,15 +165,6 @@ RDI = (EV_per_capita + Distance Score + Accessibility Score) / 3
 
 This helps governments & utility providers prioritize **rural areas needing urgent infrastructure deployment**.
 
----
-
-# 📸 **Screenshots**
-
-### **Model Results**
-
-![Model Performance](https://raw.githubusercontent.com/Dhruvchaudhary255/CSCN8040-EV-CHARGING_/main/assets/model_performance.png)
-
-*(Add your local images to /assets folder for GitHub display — I can generate final PNG files for you if needed.)*
 
 ---
 
